@@ -1,0 +1,1049 @@
+# Research Log
+
+## 15 August 2026
+
+### Objective
+Understand and simulate the Ornstein–Uhlenbeck gap process.
+
+### Question
+Does my simulation produce a stationary, mean-reverting process with the
+theoretical standard deviation?
+
+### Model
+G(t + dt) = G(t) - alpha * G(t) * dt
+            + sigma * sqrt(dt) * Z(t)
+
+Parameters:
+- alpha = 0.5
+- sigma = 0.02
+- dt = 0.01
+- duration = 100 seconds
+- initial gap = 0
+
+### What I did
+- Implemented the Euler–Maruyama update.
+- Generated one simulated path.
+- Plotted the gap against time.
+- Compared its sample mean and standard deviation with theory.
+
+### Expected result
+- Mean close to zero.
+- Standard deviation close to sigma / sqrt(2 * alpha) = 0.02.
+- Faster mean reversion when alpha increases.
+
+### Actual result
+Baseline (alpha=0.5, sigma=0.02, dt=0.01, duration=100s, seed=0):
+- sample mean  = 0.0027
+- sample std   = 0.0204
+- theory: mean = 0, s_G = sigma/sqrt(2*alpha) = 0.02
+
+Longer run (same params, duration=1000s):
+- sample mean  = -0.0004
+- sample std   = 0.0204
+(mean moved closer to 0 as duration increased; std unchanged, already at theory)
+
+Sensitivity tests (duration=100s, seed=0):
+- alpha=2.0 (up from 0.5), sigma=0.02: std = 0.0107, theory = 0.01 -> narrower
+  range (max-min = 0.067 vs 0.120 baseline), reverts faster as expected.
+- sigma=0.05 (up from 0.02), alpha=0.5: std = 0.0510, theory = 0.05 -> wider
+  range (max-min = 0.300 vs 0.120 baseline), fluctuates more as expected.
+
+### Interpretation
+Sample mean and std agree closely with theory in every case (within ~2% for
+std, mean within simulation noise of 0). Increasing alpha tightens the
+distribution around the mean and speeds up reversion, as predicted by
+s_G = sigma/sqrt(2*alpha) shrinking. Increasing sigma widens it proportionally.
+The one seed=0 run is noisy on the mean (a single path estimate of a
+theoretical 0 has nonzero sampling error); std converges faster than mean
+because std is estimated from squared deviations across all 10,000 points,
+while the mean's precision depends on the process's autocorrelation length,
+not just sample size.
+
+
+### Next step
+Run multiple simulations and examine how estimation error changes with
+simulation length.
+
+## 15 August 2026 (cont.)
+
+### Objective
+Implement the threshold trading rule (position logic only, no PnL yet).
+
+### Question
+Does the position state machine trade only on threshold crossings, and do
+trades strictly alternate buy/sell/buy/sell with no repeats?
+
+### Model
+Position q in {-1, +1} (always in the market, no flat state).
+- If G <= -theta and q == -1 (short): buy, q -> +1
+- If G >= +theta and q == +1 (long):  sell, q -> -1
+- Otherwise: hold current position.
+
+Parameters:
+- theta = 0.03 (trading threshold, distinct from alpha, the OU
+  mean-reversion speed)
+- initial_position = +1 (long) -- arbitrary choice, not specified by theory,
+  changes whether the first trade is a buy or a sell
+- gap path: alpha=0.5, sigma=0.02, dt=0.01, duration=100s, seed=0 (same
+  baseline path as the OU validation above)
+
+### What I did
+Implemented `run_trading_rule` in src/trading_strategy.py: loops over every
+point in the gap array, and only records a Trade (time, gap, action,
+position_after) when a threshold is crossed AND the position guard allows
+it -- so a gap that stays past -theta for many consecutive steps produces
+one buy, not one per step. Added `check_alternation` to assert no two
+consecutive trades have the same action.
+
+### Expected result
+Trades should strictly alternate sell/buy/sell/buy/... (starting with sell,
+since initial_position=+1 means the first possible action is a sell), with
+no duplicate consecutive actions regardless of how long the gap dwells past
+a threshold.
+
+### Actual result
+7 trades over the 100s baseline path:
+  t=14.26  sell  gap=+0.0301
+  t=17.93  buy   gap=-0.0304
+  t=32.72  sell  gap=+0.0307
+  t=53.56  buy   gap=-0.0312
+  t=59.83  sell  gap=+0.0306
+  t=75.15  buy   gap=-0.0328
+  t=79.47  sell  gap=+0.0314
+`check_alternation` passed: sell -> buy -> sell -> buy -> sell -> buy -> sell,
+no repeats.
+
+### Interpretation
+The position guard works as intended: even though the gap likely spent
+multiple consecutive dt=0.01 steps beyond +-0.03 around each crossing, only
+one trade was recorded per crossing. Alternation confirms the state machine
+is not double-triggering. Trade spacing is uneven (2.7s to 20.8s apart),
+consistent with a mean-reverting process taking a random amount of time to
+wander back out to +-theta.
+
+### Problems or questions
+- initial_position=+1 is arbitrary -- does the choice matter for downstream
+  PnL statistics, or only for whether the first trade is a buy vs sell?
+- Not yet stress-tested on a longer path (e.g. 1000s) to confirm alternation
+  holds with many more crossings.
+
+### Next step
+Add PnL calculation per completed round-trip trade, then re-run to check
+alternation still holds and start looking at profitability.
+
+## 15 August 2026 (cont. 2)
+
+### Objective
+Plot trades on the gap path and calculate trade-timing statistics across a
+range of thresholds, before touching PnL.
+
+### Question
+Do buys/sells visually line up with the +-theta boundaries (including
+overshoot), and does trade frequency respond to theta the way theory
+predicts (smaller theta -> more, more frequent trades)?
+
+### Model
+Same OU path as before (alpha=0.5, sigma=0.02, dt=0.01, duration=100s,
+seed=0) and same trading rule, run once at theta=0.03 for the plot, then
+swept over theta in {0.01, 0.02, 0.03, 0.04} for timing stats only.
+
+### What I did
+Added `plot_trades` and `timing_stats` to src/trading_strategy.py.
+`plot_trades` draws the gap path with horizontal lines at +-theta and
+scatters buys (green up-triangle) and sells (red down-triangle) at their
+(time, gap) points -> saved to paper/notes/ou_trades.png. `timing_stats`
+computes n_trades, n_buys, n_sells, and time between consecutive trades
+(np.diff on trade times) for a given trades list.
+
+### Expected result
+Buys cluster at/near -theta, sells cluster at/near +theta, with some
+overshoot past the exact line. Smaller theta -> more trades and shorter
+average time between trades; larger theta -> fewer trades and longer
+average waiting time.
+
+### Actual result
+Plot (ou_trades.png): buys and sells land essentially on their respective
+threshold lines, with visible overshoot (e.g. first buy at gap=-0.0304
+instead of exactly -0.03).
+
+theta=0.03 timing: 7 trades (3 buys, 4 sells), time between consecutive
+trades = [3.67, 14.79, 20.84, 6.27, 15.32, 4.32]s, avg = 10.87s.
+
+Threshold sweep:
+  theta=0.01: 24 trades (12 buys, 12 sells), avg time between trades = 4.29s
+  theta=0.02: 15 trades (7 buys, 8 sells),  avg time between trades = 6.09s
+  theta=0.03:  7 trades (3 buys, 4 sells),  avg time between trades = 10.87s
+  theta=0.04:  3 trades (1 buy, 2 sells),   avg time between trades = 20.39s
+
+### Interpretation
+Both predictions confirmed on this single seed=0 path: trade count and
+average wait time are monotonic in theta across all four values (24 -> 15
+-> 7 -> 3 trades; 4.29s -> 6.09s -> 10.87s -> 20.39s avg wait). This is the
+first half of the size-vs-frequency trade-off: a larger theta demands a
+bigger deviation before trading, which is inherently rarer for a
+mean-reverting process, so opportunities become scarcer as they (presumably)
+become more profitable per trade -- the other half of that trade-off isn't
+tested yet since PnL isn't computed.
+
+### Problems or questions
+- All four thresholds pass check_alternation, so the state machine holds up
+  across the whole sweep, not just theta=0.03.
+- This is one seed on one 100s path -- trade counts at small theta (24) are
+  a reasonable sample, but theta=0.04's 3 trades is a thin sample for
+  drawing strong conclusions; worth revisiting with a longer path or
+  multiple seeds once PnL analysis needs statistical power.
+
+### Next step
+Add PnL per completed round-trip trade, then examine the other half of the
+trade-off: does profit per trade grow with theta enough to offset the drop
+in trade frequency?
+
+## 15 August 2026 (cont. 3)
+
+### Objective
+Correct the position model to match the paper's exact definition before
+computing PnL: q in {-1, 0, +1} starting flat, with explicit trade
+quantities (1 lot to open from flat, 2 lots to reverse).
+
+### Question
+Previously q in {-1, +1} only, started long (initial_position=+1), and
+every trade implicitly had quantity 1. Does adding an explicit flat state
+and 2-lot reversals change the recorded trades on the same seed=0 path, and
+does check_alternation still hold?
+
+### Model
+q in {-1, 0, +1}: -1 short one lot, 0 flat, +1 long one lot.
+- Flat (q=0): G <= -theta -> buy 1 lot, q -> +1. G >= +theta -> sell 1 lot,
+  q -> -1.
+- Long (q=+1): G >= +theta -> sell 2 lots (close long + open short), q -> -1.
+- Short (q=-1): G <= -theta -> buy 2 lots (close short + open long), q -> +1.
+
+Note: the previous entry's choice to start long (initial_position=+1) was
+documented as acceptable for long-run stats since the first entry becomes
+negligible over a long path, but the paper's exact definition starts flat,
+so `run_trading_rule`'s default was changed to initial_position=0.
+
+### What I did
+Added a `quantity` field to `Trade`. Rewrote `run_trading_rule` with an
+explicit flat branch (q=0) separate from the long/short reversal branches,
+and set `initial_position=0` as the new default. Reran the theta=0.03
+baseline and the theta in {0.01, 0.02, 0.03, 0.04} sweep on the same
+alpha=0.5, sigma=0.02, dt=0.01, duration=100s, seed=0 path.
+
+### Expected result
+Starting flat should surface one additional trade at the very start of the
+path (the first threshold crossing, which was previously "pre-consumed" by
+starting long) with quantity=1, and every subsequent trade should have
+quantity=2. check_alternation should still pass since q still only
+alternates between +1 and -1 after the first entry.
+
+### Actual result
+theta=0.03: 8 trades now (was 7), 4 buys / 4 sells (was 3/4). First trade
+at t=3.67 (buy, quantity=1) -- previously invisible since the strategy
+started already long. Remaining 7 trades unchanged from the prior run,
+all quantity=2. Trade quantities: [1, 2, 2, 2, 2, 2, 2, 2].
+check_alternation passed.
+
+Threshold sweep (trade counts, all +1 vs the previous flat-start run):
+  theta=0.01: 25 trades (13 buys, 12 sells), avg time between trades = 4.12s
+  theta=0.02: 15 trades (7 buys, 8 sells),  avg time between trades = 6.09s
+  theta=0.03:  8 trades (4 buys, 4 sells),  avg time between trades = 10.87s
+  theta=0.04:  4 trades (2 buys, 2 sells),  avg time between trades = 23.29s
+(theta=0.02's count is unchanged at 15 -- the first crossing on this path
+happens to align with a threshold that was already going to trade either
+way; the monotonic trend across theta is unaffected.)
+
+### Interpretation
+The flat start only ever adds at most one extra trade (the very first
+entry) and does not otherwise change trade timing, since after that entry
+the state machine behaves identically to the old +1/-1-only version.
+Explicit quantities now correctly distinguish the 1-lot initial entry from
+the 2-lot reversals, which matters for PnL: a reversal's cost/proceeds cover
+two lots, not one, so PnL per trade must account for quantity rather than
+assuming 1 throughout.
+
+### Problems or questions
+- None new -- this was a definitional correction, not a new empirical
+  question.
+
+### Next step
+Compute PnL per completed round-trip using quantity-aware cost basis (the
+1-lot open and each 2-lot reversal), then revisit the theta sweep to see
+whether profit per opportunity grows enough with theta to offset fewer,
+rarer trades.
+
+## 15 August 2026 (cont. 4)
+
+### Objective
+Compute per-trade reward and profit rate using the paper's formula, and
+check the size-vs-frequency optimization trade-off directly instead of just
+inferring it from trade counts.
+
+### Question
+reward = -G_t * delta_q - phi*|delta_q|, with delta_q = q_after - q_before.
+At a reversal (delta_q = +-2, G = -+theta) this reduces to 2*(theta-phi)
+per the paper's derivation. Does the simulated reward match that theory,
+and does profit rate (total reward / duration) actually peak at an interior
+theta rather than increasing monotonically with theta?
+
+### Model
+Same as before, plus:
+- phi = 0.005 (half-spread cost per lot) -- arbitrary placeholder, no value
+  given yet; changes where the profit-rate peak sits, so revisit if a real
+  spread is specified.
+- reward per trade = -gap * delta_q - phi * quantity
+- profit_rate = sum(reward) / duration
+
+### What I did
+Added position_before, reward fields to Trade (quantity is now computed as
+abs(position_after - position_before) rather than hardcoded). Added
+profit_rate(trades, duration) = (total_reward, total_reward/duration).
+Reran theta=0.03 baseline and the theta in {0.01,0.02,0.03,0.04} sweep,
+same alpha=0.5, sigma=0.02, dt=0.01, duration=100s, seed=0 path, phi=0.005.
+
+### Expected result
+Reversal rewards should sit close to the theoretical 2*(theta-phi) (exact
+only without overshoot). Reward should grow with theta per trade, but
+profit rate is not obviously monotonic since trade frequency drops with
+theta -- this run is meant to check whether an interior optimum actually
+shows up on real simulated data.
+
+### Actual result
+theta=0.03 trade-by-trade (t, action, q before->after, qty, reward):
+  t=3.40   buy   0->+1  qty=1  reward=+0.0252
+  t=14.26  sell +1->-1  qty=2  reward=+0.0502
+  t=17.93  buy  -1->+1  qty=2  reward=+0.0508
+  t=32.72  sell +1->-1  qty=2  reward=+0.0513
+  t=53.56  buy  -1->+1  qty=2  reward=+0.0523
+  t=59.83  sell +1->-1  qty=2  reward=+0.0513
+  t=75.15  buy  -1->+1  qty=2  reward=+0.0556
+  t=79.47  sell +1->-1  qty=2  reward=+0.0528
+total reward = 0.3895, profit rate = 0.00390/s
+theoretical reward per full reversal = 2*(0.03-0.005) = 0.0500 -- all 7
+reversals land within ~0.005 of theory (overshoot); the 1-lot opening trade
+earns about half a reversal's reward (0.0252 ~ 0.05/2), as expected.
+
+Threshold sweep:
+  theta=0.01: 25 trades, avg wait=4.12s,  total reward=0.3145, profit rate=0.00314/s (theory/reversal=0.0100)
+  theta=0.02: 15 trades, avg wait=6.09s,  total reward=0.4681, profit rate=0.00468/s (theory/reversal=0.0300)
+  theta=0.03:  8 trades, avg wait=10.87s, total reward=0.3895, profit rate=0.00390/s (theory/reversal=0.0500)
+  theta=0.04:  4 trades, avg wait=23.29s, total reward=0.2495, profit rate=0.00250/s (theory/reversal=0.0700)
+
+### Interpretation
+Profit rate is NOT monotonic in theta on this seed: it rises from theta=0.01
+to a peak at theta=0.02 (0.00468/s), then falls at theta=0.03 and 0.04. This
+is the size-vs-frequency trade-off from the paper made concrete: reward per
+reversal grows linearly with theta (confirmed against 2*(theta-phi) theory),
+but the number of reversals shrinks faster than reward grows once theta
+exceeds ~0.02 on this path, so the product (profit rate) turns over.
+theta=0.01's total reward is also pulled down by phi=0.005 being a larger
+fraction of the small per-trade edge (2*(0.01-0.005)=0.01) -- transaction
+costs bite hardest at small theta, reinforcing that the optimum is interior,
+not at the smallest theta either.
+
+### Problems or questions
+- phi=0.005 is unvalidated -- the location of the profit-rate peak is
+  sensitive to it and will shift if the paper specifies a different
+  half-spread.
+- Single seed, single 100s path -- theta=0.02's peak (15 trades) is a
+  modest sample; should confirm the peak location is stable across seeds /
+  longer paths before treating theta=0.02 as "the" optimum.
+- Overshoot causes each reversal's actual reward to deviate slightly (both
+  directions) from the exact 2*(theta-phi) theory -- not quantified
+  systematically yet (e.g. mean/std of the deviation).
+
+### Next step
+Get a real phi value if the paper specifies one. Run the theta sweep over
+multiple seeds (or a much longer duration) to see if the profit-rate peak
+location is stable, and consider a finer theta grid around 0.02 to locate
+the optimum more precisely.
+
+## 15 August 2026 (cont. 5)
+
+### Objective
+Test the paper's closed-form prediction for the optimal threshold,
+theta* = (phi + sqrt(phi^2 + 4*s_G^2)) / 2, against the simulated profit
+rate using many seeds instead of one noisy 100s path. Then check that a
+larger phi pushes theta* upward, as the formula implies.
+
+### Question
+With s_G=0.02 (matches sigma/sqrt(2*alpha) exactly for alpha=0.5, sigma=0.02)
+and phi=0.005, theory predicts theta* ~= 0.0227. Does the simulated
+mean profit rate, averaged over many seeds and evaluated on a fine grid
+around 0.0227, actually peak there within Monte Carlo uncertainty (SE)?
+Separately: does the empirical optimal theta increase with phi as
+theta*(phi) predicts?
+
+### Model
+Same OU/trading model as before. New: src/monte_carlo_sweep.py.
+- theta_star(phi, s_G) = (phi + sqrt(phi^2 + 4*s_G^2)) / 2
+- fine grid (as specified): [0.015, 0.0175, 0.020, 0.0225, 0.025, 0.0275, 0.030]
+- n_seeds = 200, each a fresh 100s path (alpha=0.5, sigma=0.02, dt=0.01),
+  same set of thetas run on the SAME path per seed (not independently
+  resampled per theta), so differences are attributable to theta, not to
+  drawing a different path.
+
+Key implementation simplification: reward = -gap*delta_q - phi*quantity is
+affine in phi at fixed trades, and trade timing/quantities never depend on
+phi (only the threshold-crossing logic does, which has no phi in it). So
+each seed's trades were simulated ONCE per theta (at phi=0, giving
+reward0 and total_quantity), and profit_rate for any phi is recovered
+after the fact via rate(phi) = (reward0 - phi*total_quantity) / duration.
+This let the same 200 simulated paths be reused across every phi value in
+the second experiment below with zero extra simulation cost.
+
+### Expected result
+Mean profit rate vs theta should be hump-shaped with its peak at or near
+theta*=0.0227, and the theory line should fall within the error bars of
+the peak (and its neighbors). For the phi sweep, empirical peak theta
+should increase with phi, tracking the theta*(phi) curve.
+
+### Actual result
+Mean profit rate ± SE (200 seeds, phi=0.005):
+  theta=0.0150: 0.00502 +/- 0.00007, mean reversals=21.94, mean wait=4.49s
+  theta=0.0175: 0.00509 +/- 0.00007, mean reversals=18.11, mean wait=5.39s
+  theta=0.0200: 0.00509 +/- 0.00007, mean reversals=15.27, mean wait=6.32s
+  theta=0.0225: 0.00494 +/- 0.00008, mean reversals=12.73, mean wait=7.54s
+  theta=0.0250: 0.00471 +/- 0.00008, mean reversals=10.63, mean wait=9.06s
+  theta=0.0275: 0.00447 +/- 0.00008, mean reversals=8.96,  mean wait=10.69s
+  theta=0.0300: 0.00421 +/- 0.00008, mean reversals=7.55,  mean wait=12.50s
+Empirical grid-argmax peak: theta=0.02 (tied with 0.0175 to 3 sig figs).
+Plot: paper/notes/ou_mc_sweep.png.
+
+theta*(phi) theory vs. empirical peak (grid argmax over
+thetas_grid=0.0125..0.035 step 0.0025), same 200 paths reused for all phi:
+  phi=0.0025: theory=0.0213, empirical=0.0125 (grid's lower edge -- see below)
+  phi=0.0050: theory=0.0227, empirical=0.0200
+  phi=0.0100: theory=0.0256, empirical=0.0225
+  phi=0.0200: theory=0.0324, empirical=0.0325
+Plot: paper/notes/ou_phi_sweep.png.
+
+### Interpretation
+CORRECTION (see cont. 6 below): this section originally said "hypothesis
+confirmed." That overstates it -- the peak does not sit at theta*=0.0227,
+it sits in a plateau visibly below it (0.015-0.020). The result is better
+described as broadly consistent with theory (right order of magnitude, right
+side of the myopic threshold ϕ=0.005), not exact agreement. cont. 6 explains
+why: theta*(theta*-phi)=s_G^2 is itself only the large-threshold asymptote
+of the paper's exact condition, not the true OU optimum, and resolves the
+plateau against the exact answer instead of the approximation.
+
+The phi sweep confirms the qualitative prediction -- larger phi shifts the
+optimal theta up (0.0125 -> 0.02 -> 0.0225 -> 0.0325, monotonic) -- and the
+phi=0.01 and phi=0.02 points sit close to the theory curve. The phi=0.0025
+point is the exception: its empirical peak landed exactly on the grid's
+lower boundary (0.0125), which strongly suggests the true optimum for that
+phi is below the grid's range rather than genuinely at 0.0125 -- a grid
+coverage limitation, not a theory failure. Checked the full curve for
+phi=0.0025 directly: rate is still flat/decreasing from 0.0125 down to
+0.035 with 0.0125 and 0.0150 tied for the max, consistent with the true
+peak lying outside the tested range.
+
+### Problems or questions
+- Grid resolution (0.0025) and range (starts at 0.0125) are both too coarse
+  to precisely locate theta* for small phi -- need to extend the grid lower
+  (e.g. down to 0.005) to properly test phi=0.0025 and smaller.
+- 200 seeds gives SEs of ~0.00007-0.00008 on profit rate, which is not
+  quite tight enough to separate theta=0.015 from theta=0.0225 with
+  confidence (they're ~1.5 SE apart) -- more seeds would sharpen this.
+- phi is a deliberate modeling choice (this simulated market's assumed
+  half-spread), not something to "solve for" -- confirmed both phi=0.005
+  and the broader phi sweep behave as the paper's formula predicts, so
+  phi can be treated as a free parameter to study rather than something
+  needing a "true" value from elsewhere.
+
+### Next step
+Extend thetas_grid lower (down to ~0.005) to properly resolve theta* for
+small phi. Consider increasing n_seeds or duration to tighten the SEs
+enough to distinguish the plateau's actual peak from its neighbors. Once
+threshold selection is validated, this closes out the OU-surrogate
+optimization study; next candidate direction is applying the same
+machinery to a real (not simulated) gap series.
+
+## 15 August 2026 (cont. 6)
+
+### Objective
+Retract "hypothesis confirmed" from cont. 5 and replace the single-formula
+comparison with the paper's actual three-way structure: the large-threshold
+approximation theta*(theta*-phi)=s_G^2 is explicitly not the exact OU
+optimum. The exact condition solves a Dawson-function equation (paper's
+Appendix B, Proposition B.2):
+  u_D - gamma = sqrt(2) * D(u_D/sqrt(2)),  gamma = phi/s_G, D = Dawson function
+theta*(theta*-phi)=s_G^2 is that equation's u >> 1 asymptote. The paper
+reports its own exact-jump-model simulation places the true optimum about a
+fifth inside theta_D (a further, separate correction for tick/jump
+overshoot that doesn't apply to our pure-OU simulation -- we simulate the
+continuous surrogate directly, not the tick-level jump process, so our
+target for comparison is theta_D itself, not a further-reduced number).
+
+### Question
+Does our Monte Carlo profit-rate peak (which sat in a 0.015-0.020 plateau,
+visibly below theta*=0.0227) actually match theta_D once computed exactly,
+rather than eyeballing "is it near theta*"? And does theta_D itself
+outperform theta* by a statistically detectable amount, using paired
+comparisons on the shared seeds rather than comparing separate error bars?
+
+### Model
+Added to src/monte_carlo_sweep.py: theta_dawson(phi, s_G) solves the Dawson
+equation via scipy (brentq root-find on scipy.special.dawsn); theta_star
+unchanged. New paired_diff(per_seed, theta_a, theta_b, phi, duration):
+since every theta in the grid was run on the SAME 200 seeds (trade
+timing/quantity is phi- and theta-comparison-independent per seed, see
+cont. 5), differencing R_i(theta_a) - R_i(theta_b) within each seed before
+averaging cancels shared path noise -- a tighter SE than treating the two
+means as independent.
+
+Grid extended per instruction: 0.005 to 0.038 step 0.001 (was 0.0125 to
+0.035 step 0.0025), union'd with the exact theta*/theta_D values for all
+four phi in the sweep below, so those exact points are themselves grid
+members usable in paired comparisons, not just nearby approximations.
+n_seeds held at 200 (not increased yet, per instruction to prioritize the
+paired comparison first).
+
+For alpha=0.5, sigma=0.02, phi=0.005 (s_G=0.02, gamma=0.25):
+  theta* (leading-order) = 0.02266
+  theta_D (exact, Dawson) = 0.01929  (14.9% below theta*, in the same
+    direction and rough magnitude as the paper's "about a fifth" figure,
+    though that figure is specifically for their jump-model-vs-surrogate
+    gap, not this leading-order-vs-exact-surrogate gap -- the two
+    corrections happen to be similar size here, not the same correction)
+
+### Expected result
+The empirical grid-argmax should land at or very near theta_D, not theta*.
+Paired comparison of R(theta_D) - R(theta*) should be positive and several
+SEs from zero, i.e. trading at the exact optimum should beat trading at the
+leading-order approximation by a statistically real amount on the same
+paths, even though Lemma B.1 (flatness at the optimum) says that amount
+should be small.
+
+### Actual result
+Empirical grid-argmax peak: theta=0.0193 -- matches theta_D=0.01929 to 3
+decimal places (grid step 0.001, and theta_D was inserted as an exact grid
+point, so this is not a coincidence of rounding).
+
+Rates around the peak (200 seeds, phi=0.005):
+  theta=0.0170: 0.00508 ± 0.00007
+  theta=0.0180: 0.00507 ± 0.00007
+  theta=0.0190: 0.00510 ± 0.00007
+  theta=0.0193: 0.00510 ± 0.00007  <- theta_D, empirical peak
+  theta=0.0200: 0.00509 ± 0.00007
+  theta=0.0210: 0.00504 ± 0.00007
+  theta=0.0220: 0.00495 ± 0.00008
+  theta=0.0227: 0.00493 ± 0.00008  <- theta*
+
+Paired comparisons (same 200 seeds each side):
+  theta_D - theta*:        +0.00018 ± 0.00006  (3.13 SE from zero)
+  empirical peak - theta*: +0.00018 ± 0.00006  (3.13 SE from zero, identical
+                             to the row above since empirical peak == theta_D
+                             on this grid)
+Plot: paper/notes/ou_mc_sweep.png -- visibly, the curve peaks at the orange
+theta_D line, with the red theta* line sitting past the peak on the
+already-declining side.
+
+Phi sweep (grid now spans 0.005-0.038, no boundary hits):
+  phi=0.0025: theta*=0.0213, theta_D=0.0150, empirical=0.0140
+  phi=0.0050: theta*=0.0227, theta_D=0.0193, empirical=0.0193
+  phi=0.0100: theta*=0.0256, theta_D=0.0253, empirical=0.0240
+  phi=0.0200: theta*=0.0324, theta_D=0.0343, empirical=0.0320
+Plot: paper/notes/ou_phi_sweep.png -- empirical points track the theta_D
+(Dawson) curve much more closely than the theta* line at low phi, where the
+two theory curves themselves diverge most.
+
+### Interpretation
+This is the finding cont. 5 was reaching for without the right target:
+the closed-form theta* captures the correct scale and the correct
+qualitative response to phi and s_G, but the exact optimum -- and the
+simulated optimum -- sit measurably lower, and the paired comparison shows
+that gap is not simulation noise (3.13 SE, same seeds on both sides). The
+mechanism matches the paper's own account: theta* comes from keeping only
+the leading (Arrhenius/Kramers) term of the exact passage-time formula, and
+that approximation is worst exactly in the regime being tested here
+(gamma=0.25, below the paper's gamma~0.4 threshold for good agreement, and
+close to gamma~0.28 where they say the leading-order root leaves the
+"one-standard-deviation-or-more" regime the approximation assumes).
+
+At phi=0.0025 (gamma=0.125, deep in the regime where leading-order breaks
+down per the paper) the empirical peak (0.0140) and theta_D (0.0150) are
+close and both far from theta* (0.0213) -- the sharpest illustration in
+this sweep. At phi=0.02 (gamma=1.0) the empirical peak (0.0320) is
+actually a bit closer to theta* (0.0324) than to theta_D (0.0343) -- a
+reminder that at 200 seeds and 0.001 grid resolution, individual points
+can land on either side of two theory curves that are themselves only
+~6% apart in this regime (paper's own bound for gamma gtrsim 0.4); this one
+point shouldn't be read as theta_D failing.
+
+Grid extension resolved the earlier phi=0.0025 boundary question directly
+rather than by assumption: the true peak (0.0140) is comfortably inside the
+new grid (min 0.005), confirming that call was correct, but it needed
+checking, not asserting.
+
+### Problems or questions
+- The phi=0.02 empirical point sitting slightly closer to theta* than
+  theta_D is unresolved -- likely just grid/seed noise given how close the
+  two theory curves are there, but not separately verified with a paired
+  test at that phi the way phi=0.005 was.
+- Only the phi=0.005 case got the full paired-comparison treatment; the
+  other three phi values only have grid-argmax point estimates, not
+  paired significance tests against their own theta_D/theta*.
+- Still 200 seeds, not increased -- the paired comparison got a clean
+  answer without needing more, consistent with the instruction to hold off
+  on that lever.
+
+### Next step
+This closes out the OU-surrogate threshold-selection question: the
+practical takeaway is "theta* is a good starting scale, theta_D is the
+number to actually trade at when phi/s_G is not large." Freeze this OU
+section and move to the actual extension: discrete price movements
+(the paper's own tick/jump microstructure layer, which the OU surrogate
+approximates and which introduces the separate ~20% jump-overshoot
+correction the paper reports and which this log has not yet touched).
+
+## 15 August 2026 (cont. 7)
+
+### Objective
+Build and validate the discrete tick-jump model: X continuous (Brownian),
+M moves only in +-delta ticks via two competing jump intensities that lean
+toward X, no spread/parity mechanism yet (fixed spread deferred). Isolate
+what changes merely because the mid jumps, before touching trading.
+
+### Question
+Does src/simulate_discrete.py satisfy every item on the validation
+checklist: M tick-only, X continuous, up/down jump asymmetry matching the
+sign of G, mean(G)~0, and Cov(G_t,G_t+h) decaying like s_G^2 * e^(-alpha h)?
+
+### Model
+New file src/simulate_discrete.py. Per step: move X by
+sigma_X*sqrt(dt)*Z; compute g=M-X; lambda_up=mu+(alpha/delta)*max(-g,0),
+lambda_down=mu+(alpha/delta)*max(g,0); p_up=lambda_up*dt,
+p_down=lambda_down*dt; single uniform draw picks up-jump / down-jump / no
+jump; save G=M-X post-jump. Parameters: alpha=0.5 (reused from the OU
+section for comparability), mu=1.0, delta=0.005, sigma_X=0.02, dt=0.001
+(chosen so max observed (lambda_up+lambda_down)*dt = 0.0085, comfortably
+<<1, satisfying the one-event-per-step approximation the assignment
+requires).
+
+### Expected result
+All six checklist items pass; in particular the gap's autocorrelation
+should track e^(-alpha h) with alpha=0.5 closely once enough data is used.
+
+### Actual result
+Structural checks (100s path, dt=0.001) all passed cleanly:
+- mid moves only in +-1 tick steps: True
+- efficient price continuous: std(dX)=0.000634 vs theory sigma_X*sqrt(dt)=0.000632
+- P(up-jump | G<0)=0.00295 vs P(up-jump | G>=0)=0.00101 (up-jumps ~3x more
+  likely when G<0, as expected)
+- P(down-jump | G>0)=0.00274 vs P(down-jump | G<=0)=0.00075 (same asymmetry,
+  mirrored)
+- mean(G) = -0.00125 (near zero, single-path noise)
+- std(G) = 0.02070 (close to the OU section's s_G=0.02, though not forced
+  to match exactly -- delta, mu were picked freely, not calibrated to hit
+  0.02 precisely)
+
+Autocovariance decay -- see "Problems" below for the full story, but the
+short version: a 100-2000s path gave a fitted decay rate of 0.68-0.97
+against an input alpha=0.5, which looked like a real bug or a genuine
+model discrepancy. It was neither. A 6000s run (50s burn-in discarded)
+gives fitted rate = 0.5382, and independent cross-validation (below)
+confirms alpha=0.5 is correct. Plots: paper/notes/discrete_path.png (mid
+vs X, and G, over a 10s window -- visibly tick-stepped M chasing continuous
+X) and paper/notes/discrete_autocov.png (empirical autocorrelation vs
+e^(-0.5h), now a near-perfect match out to lag 6s).
+
+### Interpretation
+The model is correct; the ORIGINAL autocovariance-based validation was not
+a reliable way to check it at the durations first tried. Diagnosis, in
+order of what was tried:
+1. Single 100s path: fitted rate 0.9674, way off.
+2. Averaged over 20 independent 100s paths: 0.6688 -- better but still
+   clearly wrong, and averaging independent seeds should have killed
+   ordinary sampling noise. This ruled out "just one unlucky seed."
+3. Single 2000s path, burn-in removed, both step orderings (evaluate
+   intensity before vs after moving X within a step) tested: 0.64-0.68 in
+   both cases -- ruled out the within-step look-ahead ordering as the
+   cause (it was a reasonable suspect: the assignment's specified order
+   evaluates the jump intensity using G computed AFTER X has already moved
+   that step, a look-ahead relative to the true continuous-time
+   compensator; this turned out not to be the source of the bias, though
+   it remains a real, separate, second-order discretization detail worth
+   knowing about).
+4. Decisive cross-checks that do NOT rely on a single long time-averaged
+   path: (a) propagate 4000 independent replicates from a FIXED G_0=0.05
+   for h=0.5/1/2s and check E[G_h]/G_0 against e^(-alpha h) directly --
+   matched theory to ~0.1-0.4%, unambiguously confirming alpha=0.5 for the
+   conditional mean. (b) Cross-sectional test: burn in 3000 independent
+   paths to an approximately-stationary G_t, then continue each by h and
+   compute corr(G_t, G_t+h) across the ensemble (not time-averaged within
+   one path) -- also matched e^(-alpha h) closely (e.g. h=1: empirical
+   0.595 vs theory 0.607). Both of these independently confirm alpha=0.5
+   and rule out a model/dynamics bug.
+5. Final resolution: reran the ORIGINAL single-long-path, time-averaged
+   autocovariance-and-log-linear-fit method (same as step 1-3) but with
+   duration=8000s on the SAME seed that gave 0.68 at 2000s -- fitted rate
+   came back at 0.5142, matching theory. Duration, not ordering or model
+   correctness, was the actual variable. The mechanism: fitting a single
+   exponential via OLS on log(autocovariance ratio) across lags out to 6s
+   from a time-averaged single path is dominated by the noisiest (longest-
+   lag) points, and at 100-2000s there simply aren't enough effectively
+   independent long-lag samples (few "escapes" to lag-6s separation
+   relative to the ~2s decorrelation time) for that fit to be reliable --
+   not a bias in the strict sense (bias vanished with more data, which a
+   true bias would not do), but a finite-sample fit that happened to read
+   as "wrong" with high apparent confidence at short-to-moderate duration.
+
+The general lesson: a single time-averaged-path ACF check is a weaker
+validation tool than it looks, and disagreeing with theory at moderate
+sample size is not enough to conclude the model is wrong -- cross-checking
+via a completely different estimation method (here: fixed-start
+propagation, and cross-sectional ensemble correlation) before concluding
+"bug" saved from chasing a phantom discretization-ordering issue.
+
+### Problems or questions
+- delta, mu were chosen freely (not calibrated) -- std(G)=0.0207 landed
+  close to the OU section's s_G=0.02 by luck/reasonable parameter choice,
+  not by design. If a tight match to the OU section's s_G is wanted for
+  the upcoming theta_D comparison, calibrate mu (or delta) against the
+  measured std(G) rather than assuming it matches.
+- The look-ahead-vs-no-look-ahead step ordering was ruled out as the cause
+  of the (illusory) large bias, but a small, real, second-order
+  discretization effect from that ordering choice was never precisely
+  quantified (it was dominated by the much larger estimation-noise effect
+  during debugging). Worth a clean, dedicated comparison at fixed high
+  duration if the exact ordering ever matters downstream (per the
+  assignment's own spec, we use "evaluate intensity after moving X" i.e.
+  the look-ahead order, since that is literally what was specified).
+- validate_decay_rate defaults to 6000s + 6s of lags; this is noticeably
+  slower than the structural checks (a few seconds vs ~15s total) --
+  acceptable for a one-off validation run, would need revisiting if this
+  needs to run routinely (e.g. inside a Monte Carlo sweep).
+
+### Next step
+Run the same threshold sweep used in the OU section on this discrete gap
+series (run_trading_rule already works on any gap array + dt, no
+modification needed) and compare the discrete model's empirical optimum
+against theta_D from the OU section -- this is the comparison the paper's
+own "~20% jump-overshoot" finding predicts, and now there is a validated
+simulator to actually test it against.
+
+## 15 August 2026 (cont. 8)
+
+### Objective
+Run the threshold sweep on the validated discrete tick-jump model and
+compare its empirical optimum against theta_D and theta* from the OU
+section, testing the paper's own finding that the exact jump model's
+optimum sits inside the continuous-surrogate's theta_D (paper reports
+"about a fifth").
+
+### Question
+Does the discrete model's empirical grid-argmax peak sit measurably below
+theta_D=0.01929 (the OU section's exact Dawson optimum, same alpha=0.5,
+phi=0.005, s_G=0.02), in the direction the paper's jump-overshoot argument
+predicts? Is the gap statistically distinguishable from zero given a paired
+comparison on the same seeds?
+
+### Model
+New file src/discrete_threshold_sweep.py. Reuses theta_trade_stats,
+summarize_for_phi, paired_diff from monte_carlo_sweep.py unchanged (they
+only need a gap array + dt, agnostic to how the gap was generated) --
+run_trading_rule needed zero modification to work on discrete-model paths.
+alpha=0.5, mu=1.0, delta=0.005, sigma_X=0.02, dt=0.001, duration=100s,
+phi=0.005, 200 seeds, thetas 0.008-0.034 step 0.001 (union'd with the exact
+theta_D=0.01929 and theta*=0.02266 from the OU section as real grid
+points).
+
+### Expected result
+Empirical peak below theta_D, per the paper's account of jump overshoot
+pulling the true optimum in from the continuous-surrogate root.
+
+### Actual result
+Discrete-model empirical grid-argmax peak: theta=0.0180.
+  theta=0.0170: 0.00569 ± 0.00007
+  theta=0.0180: 0.00574 ± 0.00008  <- empirical peak
+  theta=0.0190: 0.00573 ± 0.00008
+  theta=0.0193: 0.00571 ± 0.00008  <- theta_D (OU)
+  theta=0.0227: 0.00570 ± 0.00009  <- theta* (OU)
+  theta=0.0230: 0.00571 ± 0.00009
+Plot: paper/notes/discrete_mc_sweep.png -- both theta_D and theta* lines
+sit inside/near a wide, flat plateau (theta ~0.017-0.023), not off to the
+side of it.
+
+Paired comparisons (same 200 discrete-model seeds each side):
+  empirical peak (0.0180) - theta_D (0.0193): +0.00003 ± 0.00004  (0.95 SE)
+  theta_D (0.0193) - theta* (0.0227), on discrete paths: +0.00001 ± 0.00006
+    (0.11 SE)
+
+Empirical peak sits 6.7% inside theta_D (0.0180 vs 0.0193) -- same
+direction as the paper's ~20% figure, smaller magnitude, and NOT
+statistically significant on its own (0.95 SE, well short of the ~3 SE
+that separated theta_D from theta* in the pure-OU comparison, cont. 6).
+
+### Interpretation
+Two findings, one suggestive and one solid:
+1. (Suggestive, not significant) The empirical peak's point estimate sits
+   inside theta_D, the direction the paper's jump-overshoot argument
+   predicts, but at 200 seeds the paired SE (0.95 SE from zero) is too
+   wide to call this a confirmed effect rather than noise. The OU section's
+   analogous test (theta_D vs theta*, cont. 6) needed the SAME 200-seed
+   paired design to reach 3.13 SE -- getting a comparably clean signal for
+   "discrete peak vs theta_D" would plausibly need several times more
+   seeds, since the effect size here (6.7% peak shift) is smaller than the
+   14.9% gap between theta* and theta_D that WAS resolved at 200 seeds.
+2. (Solid) theta_D and theta* are statistically indistinguishable from
+   each other WHEN EVALUATED ON THE DISCRETE MODEL (0.11 SE) -- contrast
+   with cont. 6, where the same comparison on the pure OU surrogate gave
+   3.13 SE, a real, detectable gap. This makes sense given (a) the profit
+   curve is flat at its top by construction (Lemma B.1: an O(epsilon^2)
+   cost for a threshold error of epsilon), and (b) tick/jump overshoot adds
+   its own noise on top of exact threshold placement, which plausibly
+   washes out the second-order distinction between two already-close
+   candidate thresholds (theta_D and theta* are only 0.0034 apart here).
+   Practical reading: once real market microstructure noise is present,
+   the OU section's finding that "theta_D beats theta* by a detectable
+   margin" may not survive -- the leading-order formula could be good
+   enough in practice, even though it was measurably worse in the idealised
+   continuous surrogate.
+
+### Problems or questions
+- The 6.7%-inside-theta_D point estimate is exactly the kind of result
+  that invites overinterpretation -- it matches the paper's qualitative
+  claim but is not independently significant here, and should be reported
+  as "consistent with, not confirming" the paper's ~20% figure.
+- delta=0.005, mu=1.0 were not calibrated to hit s_G=0.02 exactly (measured
+  s_G_hat~0.0207 in cont. 7); this discrete model isn't a perfectly
+  matched jump-process counterpart to the OU section's parameters, just a
+  reasonably close one built from the same alpha and comparable dispersion.
+- Only one phi (0.005) tested on the discrete model; the OU section's
+  phi-variation study has no discrete-model counterpart yet.
+
+### Next step
+If sharpening the discrete-vs-theta_D gap into a significant result is
+wanted, increase n_seeds substantially (the OU section's comparable-effect
+precedent suggests a few hundred to low thousands, not 200) rather than
+duration, since seeds is what the paired design leverages. Otherwise, this
+is a reasonable place to consider the discrete-model comparison
+qualitatively closed and move to whatever comes after (adding the paper's
+one-tick/two-tick spread-parity mechanism, or a different extension).
+
+## 15 August 2026 (cont. 9)
+
+### Objective
+Holdout confirmation, explicitly to address two statistical issues with
+cont. 8 rather than to chase significance: (1) theta_emp=0.018 was chosen
+because it won on the same 200 seeds it was then evaluated on -- selection
+bias, the winner benefits from noise by construction; (2) "0.11 SE, CI
+includes zero" for theta_D vs theta* only means no difference was detected
+in that one sample, not that the two are equivalent.
+
+### Question
+Freezing theta_emp=0.0180, theta_D=0.0193, theta*=0.0227 BEFORE generating
+any new data, and evaluating all three on a completely fresh, disjoint
+seed sample: do R(0.018)-R(theta_D) and R(theta_D)-R(theta*) still fail to
+distinguish, on out-of-sample data, or does the in-sample "peak" advantage
+of 0.018 evaporate under a fair test (as selection bias would predict)?
+
+### Model
+New file src/discrete_holdout.py. Same alpha=0.5, mu=1.0, delta=0.005,
+sigma_X=0.02, dt=0.001, duration=100s, phi=0.005 as cont. 8. Reuses
+run_seeds_discrete and rate_series unchanged. n_seeds=200 (same size as
+cont. 8's in-sample sweep -- NOT increased, per instruction not to add
+seeds merely to reach significance; this experiment's purpose is a clean
+out-of-sample test, not more statistical power). base_seed=5000, disjoint
+from cont. 8's base_seed=2000 block that theta_emp=0.018 was selected on.
+
+### Expected result
+Per the instructions: if the first interval includes zero, report "the
+data do not distinguish 0.018 from theta_D" (not "they are equal"); if the
+second includes zero, report "no detected disadvantage from theta* in the
+jump model" (not "theta_D and theta* are equivalent"), since no margin was
+defined and no equivalence test was run.
+
+### Actual result
+Fresh 200-seed holdout, mean rates (full precision, not the rounded
+display values -- see AUDIT note below for why this matters):
+  theta_emp=0.0180: 0.0057581
+  theta_D  =0.0193: 0.0057504
+  theta*   =0.0227: 0.0057420
+
+R(0.0180) - R(theta_D):
+  mean diff = 5.124e-06, SE = 3.795e-05, 95% CI = [-6.926e-05, +7.951e-05]
+  = +0.089% of theta_D's rate -- CI includes zero.
+
+R(theta_D) - R(theta*):
+  mean diff = 8.383e-06, SE = 5.845e-05, 95% CI = [-1.062e-04, +1.229e-04]
+  = +0.146% of theta_D's rate -- CI includes zero.
+
+### AUDIT (in response to a request to verify these numbers at full
+precision -- corrects two errors from the first write-up of this entry)
+1. Percentages: recomputed 100*mean_diff/R(theta_D) from full-precision
+   arrays (not the 5-decimal rounded values originally printed) --
+   0.089% and 0.146% confirmed correct as originally reported (0.09%,
+   0.15%). The apparent inconsistency a reader would find by solving
+   "0.00001 is 0.09% of what?" (=> R=0.0111) is a rounding-display
+   artifact: the true mean diff is 5.124e-06, not exactly 1.0e-05, and the
+   true R(theta_D) is 0.00575, not 0.0111. The underlying calculation was
+   right; the 5-decimal display wasn't enough precision to verify by hand.
+2. REAL ERROR, now fixed: the previous write-up described cont. 8's
+   in-sample R(0.018)-R(theta_D) effect as "6.7% of theta_D's rate." That
+   6.7% was never a profit-rate percentage -- it was the THRESHOLD-VALUE
+   gap, (theta_D-theta_emp)/theta_D = (0.0193-0.0180)/0.0193 = 6.74%, a
+   different quantity computed elsewhere in cont. 8 (the "discrete
+   empirical peak vs theta_D" line) and mislabeled as a rate percentage in
+   this entry's prose. Recomputed cont. 8's ACTUAL profit-rate percentage
+   by rerunning its exact grid point (theta_D=0.01928636..., the unrounded
+   Dawson root cont. 8 actually used, not the display-rounded 0.0193):
+   mean diff=3.419e-05, SE=3.587e-05 (ratio 0.953, matching cont. 8's
+   printed "0.95 SE" exactly and confirming this is a faithful re-run) --
+   as %% of theta_D's rate = 100*3.419e-05/0.0057092 = 0.599%. That is the
+   correct figure; "6.7%" is retracted throughout.
+3. Reduction factor, in-sample -> holdout: comparing like with like is
+   subtle here because the two experiments deliberately used different
+   theta_D values -- cont. 8's in-sample run used the exact unrounded
+   Dawson root (0.01928636...) as its grid point, while the holdout (per
+   the explicit instruction to freeze 0.0193) used the rounded value. Using
+   each experiment's OWN actual theta_D: in-sample mean diff=3.419e-05,
+   holdout mean diff=5.124e-06, ratio = 6.67. The originally reported
+   "roughly 6x" holds (now more precisely ~6.7x) -- but naively dividing
+   the ROUNDED DISPLAY values (0.00003 / 0.00001 = 3) gives a misleadingly
+   different answer. Both this and item 2 above are corrected by going
+   back to the unrounded arrays rather than re-deriving from printed
+   digits.
+
+### Interpretation
+Both intervals include zero on fresh data. Correct readings, per the
+instructions' explicit framing:
+- The data do NOT distinguish theta=0.018 from theta_D. Cont. 8's in-sample
+  point estimate for this same comparison was 3.419e-05 (0.95 SE, 0.599% of
+  theta_D's rate -- corrected from the erroneous "6.7%" above); on the
+  holdout sample it dropped to 5.124e-06 (0.089%) -- the in-sample
+  "advantage" of the selected winner shrank by a factor of ~6.7 moving from
+  the selection sample to a fresh one, consistent with selection bias (the
+  winner among many candidates on one sample regresses toward the pack on
+  a new sample). This is a textbook illustration of selection bias rather
+  than a contradiction of cont. 8 -- cont. 8's own paired test already
+  flagged the effect as non-significant (0.95 SE); this holdout shows WHY
+  that caution was warranted.
+- The holdout estimate for R(theta_D)-R(theta*) remained close to zero
+  (0.146% of theta_D's rate, 95% CI comfortably including zero) and
+  provided no evidence that the leading-order threshold underperformed in
+  the discrete model. This is consistent with, not proof of, cont. 8's
+  in-sample finding (0.11 SE there): two estimates near zero on independent
+  samples is encouraging, but a difference test failing to reject zero
+  twice does not establish equivalence -- no practical-margin equivalence
+  test (e.g. TOST) was run here.
+
+### Problems or questions
+- No equivalence test was performed; "equivalent" is deliberately avoided
+  in favor of "no detected difference" throughout, per instruction.
+- The mislabeled "6.7% of rate" (actually a threshold-distance percentage)
+  is a reminder to always state which quantity a percentage is relative to
+  when two different "% gaps" (threshold-space vs rate-space) are in play
+  in the same write-up.
+- Both holdout CIs are noticeably tighter around zero than cont. 8's
+  in-sample ones for the corresponding comparisons (e.g. 0.018-vs-theta_D:
+  95% CI half-width 0.00008 here vs SE 0.00004 alone in cont. 8, i.e.
+  narrower relative to a shrunk point estimate) -- consistent with the
+  selection-bias-inflated effect disappearing rather than the test simply
+  being underpowered.
+
+### Next step
+Freeze the discrete-model results here -- this holdout is the intended
+capstone for that section, not a launching point for more seed-chasing.
+Project story going into writeup: the exact OU optimum (theta_D) was
+reproduced in Monte Carlo and shown to beat the leading-order formula by a
+real, paired-significant margin (cont. 6); discretizing the observed price
+flattened the objective around the optimum, making that margin
+economically negligible (cont. 8); an independent holdout on fresh seeds
+confirmed this survives selection bias rather than being an artifact of
+picking the best of many candidates on one sample (cont. 9, this entry).
+If time remains, add the paper's one-tick/two-tick spread-parity mechanism
+as a final robustness extension on top of this, not as a new project arc.
+
+## 15 August 2026 (cont. 10)
+
+### Objective
+Robustness of cont. 9's conclusion across tick size (delta) and time step
+(dt), explicitly NOT to add model complexity (no parity mechanism) -- just
+to check the flattened-objective / theta_D-vs-theta* finding isn't an
+artifact of the one delta=0.005, dt=0.001 combination tested so far.
+
+### Question
+Does "no detected disadvantage from theta* vs theta_D" hold across a range
+of tick sizes (delta=0.0025 to 0.02, i.e. tick/s_G from 0.125 to 1.0) and a
+range of time steps (dt=0.001 down to 0.0002, 5x finer)? All three
+thresholds (theta_emp=0.018, theta_D=0.01928636 [exact, unrounded],
+theta*=0.02265564 [exact, unrounded]) frozen throughout -- no re-selection.
+
+### Model
+New file src/discrete_robustness.py, reusing run_seeds_discrete and
+rate_series unchanged. alpha=0.5, mu=1.0, sigma_X=0.02, phi=0.005,
+duration=100s, n_seeds=150 (reduced from 200 for runtime; this is a
+robustness scan across 7 parameter settings, not a single result being
+pushed for significance). Each (delta, dt) setting used its own disjoint
+base_seed block.
+
+### Expected result
+theta_D vs theta* should remain statistically indistinguishable (or show
+only a small, inconsistent-in-sign effect) across the whole range, since
+the flattening mechanism (Lemma B.1: O(epsilon^2) cost near the optimum,
+compounded by tick/jump overshoot) should not depend sensitively on the
+exact delta or dt chosen.
+
+### Actual result
+Tick-size sweep (dt=0.001 fixed):
+  delta=0.0025 (tick/s_G=0.125): theta_D-theta* = +1.42% of rate, 1.10 SE
+  delta=0.0050 (tick/s_G=0.250): theta_D-theta* = +1.48% of rate, 1.17 SE
+  delta=0.0100 (tick/s_G=0.500): theta_D-theta* = -0.08% of rate, 0.07 SE
+  delta=0.0200 (tick/s_G=1.000): theta_D-theta* = -1.09% of rate, 1.44 SE
+  (0.018-vs-theta_D stayed under 0.5 SE at delta=0.0025/0.005/0.01, but
+  reached 2.71 SE, -1.45%, at delta=0.02)
+
+Time-step sweep (delta=0.005 fixed):
+  dt=0.0010: theta_D-theta* = -1.87% of rate, 1.71 SE
+  dt=0.0005: theta_D-theta* = +0.03% of rate, 0.02 SE
+  dt=0.0002: theta_D-theta* = +0.64% of rate, 0.51 SE
+  (0.018-vs-theta_D stayed under 1.2 SE at dt=0.001/0.0002, reached 2.31 SE,
+  -1.43%, at dt=0.0005 -- one marginal crossing among six dt/delta settings
+  tested for this comparison, not a trend)
+
+### Interpretation
+The theta_D-vs-theta* finding is robust: across all 7 settings (4 delta
+values + 3 dt values), the SE-ratio never exceeds 1.71 and the sign
+flips inconsistently (+1.42%, +1.48%, -0.08%, -1.09%, -1.87%, +0.03%,
++0.64%) -- exactly what pure noise around a true zero effect looks like,
+not a trend hiding a real difference. This is the strongest evidence yet
+for the core conclusion, since it now survives variation in two structural
+parameters that were held fixed everywhere else in this project.
+
+The one point worth flagging is delta=0.02 (tick/s_G=1.0): mean rates
+there (~0.011) are roughly double those at delta=0.005 (~0.0057), and
+0.018-vs-theta_D reaches 2.71 SE (the largest deviation seen anywhere in
+this sweep). This is not a contradiction -- it's the regime running out:
+theta_D and theta* were computed ONCE from s_G=0.02 and held fixed across
+the whole sweep (deliberately, to test whether that ORIGINAL
+recommendation holds up, not to re-optimize per delta), but at delta=0.02
+the tick is as large as the gap's entire stationary dispersion, well
+outside the "delta << theta - phi" regime the paper's own approximation
+requires (Section 3, "This is where we work: delta << theta-phi"). The
+model is being tested past where its own assumptions apply; that theta_emp
+=0.018 (selected specifically for delta=0.005) stops looking optimal there
+is expected, not a robustness failure of the theta_D-vs-theta* claim.
+
+### Problems or questions
+- delta=0.02's larger deviations are a single data point at the edge of
+  the model's validity range -- not independently re-tested with more
+  seeds, since the point of this sweep was breadth (many settings) over
+  depth (high precision at each), consistent with not chasing significance.
+- s_G was not recalibrated per delta/dt; a delta-dependent s_G would move
+  where "theta_D" and "theta*" themselves sit, which this sweep
+  deliberately did not do (it tests robustness of the FIXED
+  recommendation, not a re-derived one per setting).
+
+### Next step
+All modeling choices are now frozen: alpha=0.5, mu=1.0, delta=0.005,
+sigma_X=0.02, dt=0.001, phi=0.005, duration=100s, thresholds
+theta_D=0.01928636, theta*=0.02265564. No further parameter changes.
+Remaining work is write-up: clean figures, a two-minute explanation of the
+project, and an explicit limitations section (small-trader/no-market-impact
+assumption, full observability of G, no parity/spread mechanism, s_G held
+fixed rather than recalibrated across the delta/dt robustness sweep, single
+alpha/phi/duration combination as the primary result). Parity mechanism
+remains a possible future extension, not part of this version.

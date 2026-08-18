@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Keep the paper's PDF local for citation/reference only -- never push it.
+paper/*.pdf
