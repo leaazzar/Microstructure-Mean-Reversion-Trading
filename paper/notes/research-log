@@ -1047,3 +1047,100 @@ assumption, full observability of G, no parity/spread mechanism, s_G held
 fixed rather than recalibrated across the delta/dt robustness sweep, single
 alpha/phi/duration combination as the primary result). Parity mechanism
 remains a possible future extension, not part of this version.
+
+UPDATE (see cont. 11 below): "no detected disadvantage from theta*"
+needed one more revision. A single, predetermined larger-n rerun (not
+seed-chasing) found the effect was real all along, just below the n=200
+noise floor.
+
+## 27 September 2026 (cont. 11)
+
+### Objective
+Test whether "no significant difference between theta_D and theta* in the
+discrete model" (cont. 8, cont. 9) reflected a true null effect or just
+insufficient statistical power at n=200. Requested directly: "can we do
+1000" -- run once, at a predetermined larger n, on a completely fresh seed
+block, and report whatever comes out, rather than incrementally growing
+n on the same run until something crosses a threshold (which would be
+exactly the p-hacking this project has repeatedly avoided).
+
+### Question
+At n=1000 (5x the seed count used everywhere else in the discrete-model
+section), does R(theta_D) - R(theta*) remain statistically indistinguishable
+from zero, or does the extra power reveal a real, small effect that n=200
+simply couldn't resolve? Same three frozen thresholds as cont. 9:
+theta_emp=0.0180, theta_D=0.0193, theta*=0.0227 (rounded values, matching
+the holdout's convention, not cont. 8's unrounded Dawson root).
+
+### Model
+Same alpha=0.5, mu=1.0, delta=0.005, sigma_X=0.02, dt=0.001, duration=100s,
+phi=0.005 as every discrete-model experiment since cont. 7. n_seeds=1000,
+base_seed=10000 -- a fresh block, disjoint from both cont. 8's selection
+block (base_seed=2000) and cont. 9's holdout block (base_seed=5000), so
+this is a third, independent sample, not a re-use or extension of either
+prior one.
+
+### Expected result
+If cont. 8/9's null finding reflected a true zero effect, more seeds should
+tighten the confidence interval around zero without shifting it away from
+zero. If it reflected low power, the CI should narrow AND move away from
+zero as the extra data resolves a real underlying difference.
+
+### Actual result
+n=1000, base_seed=10000:
+  theta_emp=0.0180: mean rate = 0.005743 +/- 0.000034 (SE)
+  theta_D  =0.0193: mean rate = 0.005774 +/- 0.000036 (SE)
+  theta*   =0.0227: mean rate = 0.005704 +/- 0.000038 (SE)
+
+R(0.0180) - R(theta_D): mean diff = -3.172e-05, SE = 1.668e-05 (1.90 SE),
+  95% CI = [-6.441e-05, +9.71e-07] -- includes zero, but only just; sign
+  flipped negative from cont. 9's holdout (+5.124e-06 there).
+
+R(theta_D) - R(theta*): mean diff = +7.062e-05, SE = 2.588e-05 (2.73 SE),
+  95% CI = [+1.989e-05, +1.214e-04] -- does NOT include zero.
+  = +1.22% of theta_D's rate.
+
+Sanity check on the scaling: SE shrank from 5.845e-05 (n=200, cont. 9) to
+2.588e-05 (n=1000) for the same comparison, a factor of 2.26 -- matches
+the sqrt(5)=2.236 expected from a 5x sample size increase, confirming
+this is the expected noise reduction, not an artifact.
+
+### Interpretation
+The null result in cont. 8/9 was a power problem, not a true zero effect.
+theta_D really does earn more than theta* in the discrete model, by a
+small but now statistically real margin (~1.2% of profit rate) -- the same
+qualitative finding as the pure-OU-surrogate result in cont. 6, just much
+smaller in magnitude and requiring 5x the sample size to detect. This
+revises, rather than contradicts, cont. 8/9: their conclusion should have
+been stated as "no detectable difference at this sample size," not "no
+difference" -- a distinction this log tried to hold to throughout but
+which the discrete-model write-ups (cont. 8's "no evidence... provided no
+evidence that theta* underperformed", cont. 9's italicized "not proof")
+came close to blurring by not stressing power explicitly enough.
+
+Separately, theta_emp=0.018's comparison to theta_D flipped sign (positive
+in the n=200 holdout, negative here) and sits at 1.90 SE -- still not
+clearing significance, and the flip itself is consistent with 0.018
+having no real, reproducible edge over theta_D at all; its apparent
+in-sample "win" (cont. 8) was noise from a single selection sample, exactly
+as the selection-bias story always said.
+
+### Problems or questions
+- This was one predetermined n=1000 run, not repeated -- proper practice
+  was followed (fixed thresholds, fresh seeds, run once, report the result
+  regardless of outcome), but a single run at any n still has sampling
+  variance; the point estimate (+1.22%) shouldn't be treated as more
+  precise than its own CI states ([+0.34%, +2.10%] of theta_D's rate,
+  computed the same way as the mean-diff CI).
+- Given the effect is this small, it's now an open question whether it
+  would still be economically meaningful net of any real-world costs not
+  modeled here (execution slippage, latency) -- the OU-surrogate section's
+  ~15% effect (cont. 6) was unambiguously worth capturing; a ~1.2% effect
+  is a much closer call.
+
+### Next step
+Treat this as the final word on theta_D vs theta* for this project: real,
+small, positive, now demonstrated at adequate power. Re-freeze the
+discrete-model conclusion with this correction folded in; no further seed
+increases planned unless a new, different question motivates one (per the
+same seeds-are-not-free-to-spend-on-fishing principle used throughout).
